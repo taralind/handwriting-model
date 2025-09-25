@@ -15,27 +15,32 @@ api_key = "your-api-key-here" # moondream api key
 # align photo to the template
 def align_form_using_logo(template_img, photo_path):
     template_gray = cv2.cvtColor(template_img, cv2.COLOR_BGR2GRAY)
-
+    
     photo_img = cv2.imread(photo_path)
+    # resize to roughly template size
+    photo_img = cv2.resize(photo_img, (template_img.shape[1], template_img.shape[0]))
     photo_gray = cv2.cvtColor(photo_img, cv2.COLOR_BGR2GRAY)
 
-    # ORB feature detector
-    orb = cv2.ORB_create(2000)
-
+    orb = cv2.ORB_create(4000)
     kp1, des1 = orb.detectAndCompute(template_gray, None)
     kp2, des2 = orb.detectAndCompute(photo_gray, None)
 
-    # Matcher
-    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-    matches = matcher.match(des1, des2)
-    matches = sorted(matches, key=lambda x: x.distance)
+    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
+    matches = bf.knnMatch(des1, des2, k=2)
 
-    # Use best N matches
-    N_MATCHES = 100
-    src_pts = np.float32([kp1[m.queryIdx].pt for m in matches[:N_MATCHES]]).reshape(-1, 1, 2)
-    dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches[:N_MATCHES]]).reshape(-1, 1, 2)
+    # Lowe's ratio test
+    good_matches = []
+    for m, n in matches:
+        if m.distance < 0.75 * n.distance:
+            good_matches.append(m)
 
-    # Estimate homography and warp
+    if len(good_matches) < 10:
+        print("Warning: not enough good matches for reliable alignment")
+        return photo_img
+
+    src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1,1,2)
+    dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1,1,2)
+
     H, _ = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
     height, width = template_img.shape[:2]
     aligned = cv2.warpPerspective(photo_img, H, (width, height))
@@ -87,14 +92,14 @@ aligned_image = align_form_using_logo(template_img, photo_input_path)
 cv2.imwrite("aligned_debug_output.png", aligned_image)
 ocr_results_moondream = extract_fields_from_aligned_image_moondream(aligned_image, boxes_json_path, api_key)
 
-print("\Results:")
+print("Results:")
 for label, value in ocr_results_moondream.items():
     print(f"{label}: {value}")
 
 
 ### CREATING TABLE & CSV FROM EXTRACTED DATA
 
-with open("detected_cells_240925.json", "r") as f:
+with open("template_boxes_3aths_v1.json", "r") as f:
     cell_coords = json.load(f)
 
 cell_values = ocr_results_moondream
