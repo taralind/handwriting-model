@@ -55,6 +55,9 @@ def extract_fields_from_aligned_image_moondream(image, boxes_json_path, api_key)
     # Init Moondream once
     model = md.vl(api_key=api_key)
 
+    # folder to store images of boxes
+     os.makedirs("rois", exist_ok=True)
+
     with open(boxes_json_path, "r") as f:
         box_coords = json.load(f)
 
