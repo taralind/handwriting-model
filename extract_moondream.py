@@ -2,10 +2,10 @@ import cv2
 import numpy as np
 import json
 import re
-from pdf2image import convert_from_path
 from PIL import Image, ImageEnhance, ImageFilter
 import moondream as md
 import csv
+import fitz
 
 boxes_json_path = "template_boxes_3aths_v1.json" # created in template.py
 template_pdf_path = "template_3aths_v1.pdf" # blank template pdf
@@ -78,7 +78,9 @@ def extract_fields_from_aligned_image_moondream(image, boxes_json_path, api_key)
 
     return results
 
-template_img = convert_from_path(template_pdf_path, dpi=300)[0]
+doc = fitz.open(template_pdf_path)
+pix = doc[0].get_pixmap()
+template_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 template_img = cv2.cvtColor(np.array(template_img), cv2.COLOR_RGB2BGR)
 
 aligned_image = align_form_using_logo(template_img, photo_input_path)

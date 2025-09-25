@@ -2,14 +2,17 @@ import cv2
 import json
 import numpy as np
 from pdf2image import convert_from_path
+import fitz
+from PIL import Image
 
 # UPLOAD TEMPLATE
 pdf_path = "template_3aths_v1.pdf"
 output_json = "template_boxes_3aths_v1.json"
 
 # Convert pdf to image
-images = convert_from_path(pdf_path, dpi=300)
-img = images[0]
+doc = fitz.open(pdf_path)
+pix = doc[0].get_pixmap()
+img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
 img = cv2.cvtColor(np.array(img), cv2.COLOR_RGB2BGR)
 img_copy = img.copy()
 
