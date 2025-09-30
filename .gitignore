@@ -64,6 +64,3 @@ coverage.xml
 *.log
 *.tmp
 *.bak
-
-# environment variablle
-.env
