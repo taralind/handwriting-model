@@ -5,48 +5,46 @@ import re
 from PIL import Image, ImageEnhance, ImageFilter
 import moondream as md
 import csv
-import fitz
+from dotenv import load_dotenv
+import os
 
-boxes_json_path = "template_boxes_3aths_v1.json" # created in template.py
-template_pdf_path = "template_3aths_v1.pdf" # blank template pdf
-photo_input_path = "photo.png" # photo of filled form
-api_key = "your-api-key-here" # moondream api key
+boxes_json_path = "templates_jsons/template_boxes_3aths_v1.json" # created in template.py
+template_path = "templates/template_3aths_v1.png" # blank template png
+photo_input_path = "photos/photo_3aths_v1.png" # png photo of filled form
+
+# API KEY
+load_dotenv()
+api_key = os.getenv("MOONDREAM_API_KEY")
 
 # align photo to the template
 def align_form_using_logo(template_img, photo_path):
     template_gray = cv2.cvtColor(template_img, cv2.COLOR_BGR2GRAY)
-    
+
     photo_img = cv2.imread(photo_path)
-    # resize to roughly template size
-    photo_img = cv2.resize(photo_img, (template_img.shape[1], template_img.shape[0]))
     photo_gray = cv2.cvtColor(photo_img, cv2.COLOR_BGR2GRAY)
 
-    orb = cv2.ORB_create(4000)
+    # ORB feature detector
+    orb = cv2.ORB_create(2000)
+
     kp1, des1 = orb.detectAndCompute(template_gray, None)
     kp2, des2 = orb.detectAndCompute(photo_gray, None)
 
-    bf = cv2.BFMatcher(cv2.NORM_HAMMING)
-    matches = bf.knnMatch(des1, des2, k=2)
+    # Matcher
+    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
+    matches = matcher.match(des1, des2)
+    matches = sorted(matches, key=lambda x: x.distance)
 
-    # Lowe's ratio test
-    good_matches = []
-    for m, n in matches:
-        if m.distance < 0.75 * n.distance:
-            good_matches.append(m)
+    # Use best N matches
+    N_MATCHES = 300
+    src_pts = np.float32([kp1[m.queryIdx].pt for m in matches[:N_MATCHES]]).reshape(-1, 1, 2)
+    dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches[:N_MATCHES]]).reshape(-1, 1, 2)
 
-    if len(good_matches) < 10:
-        print("Warning: not enough good matches for reliable alignment")
-        return photo_img
-
-    src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1,1,2)
-    dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1,1,2)
-
+    # Estimate homography and warp
     H, _ = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
     height, width = template_img.shape[:2]
     aligned = cv2.warpPerspective(photo_img, H, (width, height))
 
     return aligned
-  
 
 # function to run moondream on each box from template
 def extract_fields_from_aligned_image_moondream(image, boxes_json_path, api_key):
@@ -55,18 +53,14 @@ def extract_fields_from_aligned_image_moondream(image, boxes_json_path, api_key)
     # Init Moondream once
     model = md.vl(api_key=api_key)
 
-    # folder to store images of boxes
-     os.makedirs("rois", exist_ok=True)
-
     with open(boxes_json_path, "r") as f:
         box_coords = json.load(f)
 
     results = {}
     for label, (x1, y1, x2, y2) in box_coords.items():
-        #roi = gray[y1:y2, x1:x2]
 
         # adding padding to boxes
-        padding = 4
+        padding = 3
         x1_pad = max(0, x1 - padding)
         y1_pad = max(0, y1 - padding)
         x2_pad = min(gray.shape[1], x2 + padding)
@@ -74,9 +68,6 @@ def extract_fields_from_aligned_image_moondream(image, boxes_json_path, api_key)
         roi = gray[y1_pad:y2_pad, x1_pad:x2_pad]
 
         roi_pil = Image.fromarray(roi)
-
-        # save boxes for inspection/debugging
-        roi_pil.save(f"rois/debug_roi_{label}_moondream.png")
 
         # Query Moondream
         response = model.query(roi_pil, "Extract all handwritten text from inside this box. If blank, return an empty string. Expect mostly numbers or symbols unless clearly a word.")
@@ -86,11 +77,7 @@ def extract_fields_from_aligned_image_moondream(image, boxes_json_path, api_key)
 
     return results
 
-doc = fitz.open(template_pdf_path)
-pix = doc[0].get_pixmap()
-template_img = Image.frombytes("RGB", [pix.width, pix.height], pix.samples)
-template_img = cv2.cvtColor(np.array(template_img), cv2.COLOR_RGB2BGR)
-
+template_img = cv2.imread(template_path)
 aligned_image = align_form_using_logo(template_img, photo_input_path)
 cv2.imwrite("aligned_debug_output.png", aligned_image)
 ocr_results_moondream = extract_fields_from_aligned_image_moondream(aligned_image, boxes_json_path, api_key)
@@ -102,7 +89,7 @@ for label, value in ocr_results_moondream.items():
 
 ### CREATING TABLE & CSV FROM EXTRACTED DATA
 
-with open("template_boxes_3aths_v1.json", "r") as f:
+with open(boxes_json_path, "r") as f:
     cell_coords = json.load(f)
 
 cell_values = ocr_results_moondream
