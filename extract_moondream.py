@@ -60,7 +60,7 @@ def extract_fields_from_aligned_image_moondream(image, boxes_json_path, api_key)
     for label, (x1, y1, x2, y2) in box_coords.items():
 
         # adding padding to boxes
-        padding = 3
+        padding = 1
         x1_pad = max(0, x1 - padding)
         y1_pad = max(0, y1 - padding)
         x2_pad = min(gray.shape[1], x2 + padding)
@@ -70,7 +70,7 @@ def extract_fields_from_aligned_image_moondream(image, boxes_json_path, api_key)
         roi_pil = Image.fromarray(roi)
 
         # Query Moondream
-        response = model.query(roi_pil, "Extract all handwritten text from inside this box. If blank, return an empty string. Expect mostly numbers or symbols unless clearly a word.")
+        response = model.query(roi_pil, "Extract all handwritten text from inside this box. If blank, return an empty string. Expect mostly numbers or symbols unless clearly a word. Ignore straight lines / box borders - these are not text.")
         answer = response.get("answer", "").strip()
 
         results[label] = answer
