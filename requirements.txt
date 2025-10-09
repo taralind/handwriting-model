@@ -4,3 +4,5 @@ Pillow
 moondream
 PyMuPDF
 python-dotenv
+streamlit==1.50.0
+pandas

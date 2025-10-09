@@ -64,3 +64,6 @@ coverage.xml
 *.log
 *.tmp
 *.bak
+
+output_table.csv
+aligned_debug_output.png
