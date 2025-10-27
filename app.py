@@ -15,7 +15,8 @@ st.set_page_config(page_title="Handwritten Form Processor", layout="wide")
 
 # --- LOAD ENV + API KEY ---
 load_dotenv()
-api_key = os.getenv("MOONDREAM_API_KEY")
+#api_key = os.getenv("MOONDREAM_API_KEY")
+api_key = st.secrets["MOONDREAM_API_KEY"]
 
 # --- FUNCTIONS ---
 def align_form_using_logo(template_img, photo_array, use_sift=True):
