@@ -16,7 +16,7 @@ st.set_page_config(page_title="Handwritten Form Processor", layout="wide")
 # --- LOAD ENV + API KEY ---
 load_dotenv()
 #api_key = os.getenv("MOONDREAM_API_KEY")
-api_key = st.secrets["MOONDREAM_API_KEY"]
+api_key = st.secrets.MOONDREAM_API_KEY.api_key
 
 # --- FUNCTIONS ---
 def align_form_using_logo(template_img, photo_array, use_sift=True):
@@ -180,6 +180,7 @@ def create_table_from_results(ocr_results, boxes_json_path):
 # added so that the image alignment step is cached
 # so that the extraction step doesn't re-run after pressing download to csv
 @st.cache_data(show_spinner=False)
+@st.cache_data(hash_funcs={bytes: lambda _: None, np.ndarray: lambda _: None})
 def get_ocr_results(aligned_img_bytes, boxes_json_path, api_key):
     import numpy as np
     import cv2
