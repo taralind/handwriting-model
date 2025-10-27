@@ -18,6 +18,11 @@ load_dotenv()
 #api_key = os.getenv("MOONDREAM_API_KEY")
 api_key = st.secrets.MOONDREAM_API_KEY.api_key
 
+if not api_key:
+    st.error("❌ API key missing!")
+else:
+    st.caption("✅ API key detected.")
+
 # --- FUNCTIONS ---
 def align_form_using_logo(template_img, photo_array, use_sift=True):
     """
