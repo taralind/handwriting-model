@@ -3,8 +3,8 @@ import json
 import numpy as np
 
 # UPLOAD TEMPLATE
-template_path = "templates/template_6aths_v1.png"
-output_json = "templates_jsons/template_boxes_6aths_v1.json"
+template_path = "templates/template_4aths_v1.png"
+output_json = "templates_jsons/template_boxes_4aths_v1.json"
 
 img = cv2.imread(template_path)
 img_copy = img.copy()

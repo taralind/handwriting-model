@@ -8,39 +8,71 @@ import csv
 from dotenv import load_dotenv
 import os
 
-boxes_json_path = "templates_jsons/template_boxes_3aths_v1.json" # created in template.py
-template_path = "templates/template_3aths_v1.png" # blank template png
-photo_input_path = "photos/photo_3aths_v1.png" # png photo of filled form
+boxes_json_path = "templates_jsons/template_boxes_4aths_v1.json" # created in template.py
+template_path = "templates/template_4aths_v1.png" # blank template png
+photo_input_path = "photos/photo_4aths_v1.png" # png photo of filled form
 
 # API KEY
 load_dotenv()
 api_key = os.getenv("MOONDREAM_API_KEY")
 
-# align photo to the template
-def align_form_using_logo(template_img, photo_path):
-    template_gray = cv2.cvtColor(template_img, cv2.COLOR_BGR2GRAY)
-
+def align_form_using_logo(template_img, photo_path, use_sift=True):
+    # Load photo
     photo_img = cv2.imread(photo_path)
+    if photo_img is None:
+        raise FileNotFoundError(f"Could not read image at {photo_path}")
+    
+    # Convert to grayscale
+    template_gray = cv2.cvtColor(template_img, cv2.COLOR_BGR2GRAY)
     photo_gray = cv2.cvtColor(photo_img, cv2.COLOR_BGR2GRAY)
 
-    # ORB feature detector
-    orb = cv2.ORB_create(2000)
+    # Choose feature detector
+    if use_sift and hasattr(cv2, 'SIFT_create'):
+        detector = cv2.SIFT_create()
+        norm_type = cv2.NORM_L2
+        flann_index = 1  # KDTREE
+        index_params = dict(algorithm=flann_index, trees=5)
+    else:
+        detector = cv2.ORB_create(2000)
+        norm_type = cv2.NORM_HAMMING
+        flann_index = 6  # LSH
+        index_params = dict(algorithm=flann_index,
+                            table_number=6,
+                            key_size=12,
+                            multi_probe_level=1)
 
-    kp1, des1 = orb.detectAndCompute(template_gray, None)
-    kp2, des2 = orb.detectAndCompute(photo_gray, None)
+    search_params = dict(checks=50)
+    flann = cv2.FlannBasedMatcher(index_params, search_params)
 
-    # Matcher
-    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-    matches = matcher.match(des1, des2)
-    matches = sorted(matches, key=lambda x: x.distance)
+    # Detect keypoints and descriptors
+    kp1, des1 = detector.detectAndCompute(template_gray, None)
+    kp2, des2 = detector.detectAndCompute(photo_gray, None)
 
-    # Use best N matches
-    N_MATCHES = 300
-    src_pts = np.float32([kp1[m.queryIdx].pt for m in matches[:N_MATCHES]]).reshape(-1, 1, 2)
-    dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches[:N_MATCHES]]).reshape(-1, 1, 2)
+    if des1 is None or des2 is None:
+        raise ValueError("Could not find features in one of the images.")
 
-    # Estimate homography and warp
-    H, _ = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
+    # Match descriptors using KNN
+    matches = flann.knnMatch(des1, des2, k=2)
+
+    # Apply Lowe’s ratio test
+    good_matches = []
+    for m, n in matches:
+        if m.distance < 0.75 * n.distance:
+            good_matches.append(m)
+
+    if len(good_matches) < 10:
+        raise ValueError("Not enough good matches to align images.")
+
+    # Extract matched keypoints
+    src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+    dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+
+    # Find homography
+    H, mask = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
+    if H is None:
+        raise ValueError("Homography could not be computed.")
+
+    # Warp the photo to align with the template
     height, width = template_img.shape[:2]
     aligned = cv2.warpPerspective(photo_img, H, (width, height))
 
@@ -70,7 +102,7 @@ def extract_fields_from_aligned_image_moondream(image, boxes_json_path, api_key)
         roi_pil = Image.fromarray(roi)
 
         # Query Moondream
-        response = model.query(roi_pil, "Extract all handwritten text from inside this box. If blank, return an empty string. Expect mostly numbers or symbols unless clearly a word. Ignore straight lines / box borders - these are not text.")
+        response = model.query(roi_pil, "Extract all handwritten text from inside this box. If blank, return an empty string. Expect mostly numbers or symbols unless clearly a word or letters. Ignore straight lines / box borders - these are not text. The box may contain two evenly spaced dots- if so, acknowledge these as decimal points between the numbers next to them.")
         answer = response.get("answer", "").strip()
 
         results[label] = answer
@@ -89,56 +121,101 @@ for label, value in ocr_results_moondream.items():
 
 ### CREATING TABLE & CSV FROM EXTRACTED DATA
 
-with open(boxes_json_path, "r") as f:
-    cell_coords = json.load(f)
+def export_table_with_merged_cells(boxes_json_path, ocr_results, output_csv_path,
+                                   row_tol=10, col_tol=10, size_threshold=0.5):
+    """
+    Rebuild a table from cell bounding boxes and OCR values, handling merged cells.
 
-cell_values = ocr_results_moondream
+    Args:
+        boxes_json_path: path to JSON file with box coordinates.
+        ocr_results: dict mapping cell_id -> OCR text.
+        output_csv_path: path to write CSV.
+        row_tol: tolerance (pixels) to cluster rows.
+        col_tol: tolerance (pixels) to cluster columns.
+        size_threshold: ignore boxes that are bigger than fraction of table size.
+    """
 
-# Combine coordinates + values
-cells = []
-for cell_id, coords in cell_coords.items():
-    x1, y1, x2, y2 = coords
-    value = cell_values.get(cell_id, "")
+    # Load boxes
+    with open(boxes_json_path, "r") as f:
+        cell_coords = json.load(f)
 
-    # remove erroneous cell values
-    if len(value) > 20:
-        value = ""
+    # Compute approximate table size
+    all_boxes = np.array(list(cell_coords.values()))
+    table_width = all_boxes[:, 2].max()
+    table_height = all_boxes[:, 3].max()
 
-    cells.append({
-        "id": cell_id,
-        "x": x1,
-        "y": y1,
-        "w": x2 - x1,
-        "h": y2 - y1,
-        "value": value
-    })
+    # Build cells with centers
+    cells = []
+    for cell_id, coords in cell_coords.items():
+        x1, y1, x2, y2 = coords
+        w, h = x2 - x1, y2 - y1
 
-# Sort into rows
-row_tolerance = 10  # tolerance for considering cells on the same row
-cells.sort(key=lambda c: (c["y"], c["x"]))
+        # Skip huge boxes that are likely the full table
+        if w > size_threshold * table_width or h > size_threshold * table_height:
+            continue
 
-rows = []
-current_row = []
-last_y = None
+        value = ocr_results.get(cell_id, "").strip()
+        cells.append({
+            "id": cell_id,
+            "x1": x1, "y1": y1,
+            "x2": x2, "y2": y2,
+            "cx": (x1 + x2)/2,
+            "cy": (y1 + y2)/2,
+            "value": value
+        })
 
-for cell in cells:
-    if last_y is None or abs(cell["y"] - last_y) <= row_tolerance:
-        current_row.append(cell)
-    else:
-        current_row.sort(key=lambda c: c["x"])
-        rows.append(current_row)
-        current_row = [cell]
-    last_y = cell["y"]
+    if not cells:
+        raise ValueError("No cells to process after filtering large boxes.")
 
-# Add last row
-if current_row:
-    current_row.sort(key=lambda c: c["x"])
-    rows.append(current_row)
+    # --- Cluster row centers ---
+    row_centers = sorted([c["cy"] for c in cells])
+    rows = []
+    current_row = [row_centers[0]]
+    for cy in row_centers[1:]:
+        if abs(cy - np.mean(current_row)) <= row_tol:
+            current_row.append(cy)
+        else:
+            rows.append(np.mean(current_row))
+            current_row = [cy]
+    rows.append(np.mean(current_row))  # last row
 
-# Write to csv
-with open("output_table.csv", "w", newline="", encoding="utf-8") as f:
-    writer = csv.writer(f)
-    for row in rows:
-        writer.writerow([c["value"] for c in row])
+    # --- Cluster column centers ---
+    col_centers = sorted([c["cx"] for c in cells])
+    cols = []
+    current_col = [col_centers[0]]
+    for cx in col_centers[1:]:
+        if abs(cx - np.mean(current_col)) <= col_tol:
+            current_col.append(cx)
+        else:
+            cols.append(np.mean(current_col))
+            current_col = [cx]
+    cols.append(np.mean(current_col))  # last column
 
-print("CSV file created: output_table.csv")
+    n_rows = len(rows)
+    n_cols = len(cols)
+
+    # --- Create empty grid ---
+    grid = [["" for _ in range(n_cols)] for _ in range(n_rows)]
+
+    # --- Place cells in grid ---
+    for c in cells:
+        # Find rows the cell spans
+        row_indices = [i for i, ry in enumerate(rows) if (c["y1"] <= ry <= c["y2"])]
+        # Find columns the cell spans
+        col_indices = [j for j, cx in enumerate(cols) if (c["x1"] <= cx <= c["x2"])]
+
+        # Fill only the top-left slot of the spanned area
+        if row_indices and col_indices:
+            top_row = row_indices[0]
+            left_col = col_indices[0]
+            grid[top_row][left_col] = c["value"]
+
+    # --- Write to CSV ---
+    with open(output_csv_path, "w", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        for row in grid:
+            writer.writerow(row)
+
+    print(f"Exported table to {output_csv_path}")
+            
+export_table_with_merged_cells(boxes_json_path, ocr_results_moondream, "output_table.csv")

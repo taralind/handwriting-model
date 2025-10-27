@@ -17,31 +17,77 @@ st.set_page_config(page_title="Handwritten Form Processor", layout="wide")
 load_dotenv()
 api_key = os.getenv("MOONDREAM_API_KEY")
 
-# --- FILE PATHS ---
-# commented out while we've got template selection in the UI
-#TEMPLATE_PATH = "templates/template_3aths_v1.png"
-#BOXES_JSON_PATH = "templates_jsons/template_boxes_3aths_v1.json"
-
 # --- FUNCTIONS ---
-def align_form_using_logo(template_img, photo_array):
+def align_form_using_logo(template_img, photo_array, use_sift=True):
+    """
+    Aligns a photo (numpy array) with a template image using logo features.
+
+    Args:
+        template_img (np.ndarray): Template image (e.g., loaded with cv2.imread or from file_bytes).
+        photo_array (np.ndarray): Uploaded image as numpy array (e.g., from Streamlit file_uploader).
+        use_sift (bool): Use SIFT if available; otherwise fallback to ORB.
+
+    Returns:
+        aligned (np.ndarray): The aligned photo warped to the template.
+    """
+    # --- Validate input ---
+    if template_img is None or photo_array is None:
+        raise ValueError("Template or photo image is missing.")
+
+    # Convert to grayscale
     template_gray = cv2.cvtColor(template_img, cv2.COLOR_BGR2GRAY)
     photo_gray = cv2.cvtColor(photo_array, cv2.COLOR_BGR2GRAY)
 
-    orb = cv2.ORB_create(2000)
-    kp1, des1 = orb.detectAndCompute(template_gray, None)
-    kp2, des2 = orb.detectAndCompute(photo_gray, None)
+    # Choose feature detector
+    if use_sift and hasattr(cv2, 'SIFT_create'):
+        detector = cv2.SIFT_create()
+        norm_type = cv2.NORM_L2
+        flann_index = 1  # KDTREE
+        index_params = dict(algorithm=flann_index, trees=5)
+    else:
+        detector = cv2.ORB_create(2000)
+        norm_type = cv2.NORM_HAMMING
+        flann_index = 6  # LSH
+        index_params = dict(
+            algorithm=flann_index,
+            table_number=6,
+            key_size=12,
+            multi_probe_level=1
+        )
 
-    matcher = cv2.BFMatcher(cv2.NORM_HAMMING, crossCheck=True)
-    matches = matcher.match(des1, des2)
-    matches = sorted(matches, key=lambda x: x.distance)
+    # Create matcher
+    search_params = dict(checks=50)
+    flann = cv2.FlannBasedMatcher(index_params, search_params)
 
-    N_MATCHES = 300
-    src_pts = np.float32([kp1[m.queryIdx].pt for m in matches[:N_MATCHES]]).reshape(-1, 1, 2)
-    dst_pts = np.float32([kp2[m.trainIdx].pt for m in matches[:N_MATCHES]]).reshape(-1, 1, 2)
+    # Detect keypoints and descriptors
+    kp1, des1 = detector.detectAndCompute(template_gray, None)
+    kp2, des2 = detector.detectAndCompute(photo_gray, None)
 
-    H, _ = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
+    if des1 is None or des2 is None:
+        raise ValueError("Could not find enough features in one of the images.")
+
+    # Match descriptors using KNN
+    matches = flann.knnMatch(des1, des2, k=2)
+
+    # Apply Lowe’s ratio test
+    good_matches = [m for m, n in matches if m.distance < 0.75 * n.distance]
+
+    if len(good_matches) < 10:
+        raise ValueError(f"Not enough good matches to align images ({len(good_matches)} found).")
+
+    # Extract matched keypoints
+    src_pts = np.float32([kp1[m.queryIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+    dst_pts = np.float32([kp2[m.trainIdx].pt for m in good_matches]).reshape(-1, 1, 2)
+
+    # Find homography
+    H, mask = cv2.findHomography(dst_pts, src_pts, cv2.RANSAC, 5.0)
+    if H is None:
+        raise ValueError("Homography could not be computed.")
+
+    # Warp the photo to align with the template
     height, width = template_img.shape[:2]
     aligned = cv2.warpPerspective(photo_array, H, (width, height))
+
     return aligned
 
 
@@ -71,7 +117,8 @@ def extract_fields_from_aligned_image_moondream(image, boxes_json_path, api_key)
         response = model.query(
             roi_pil,
             "Extract all handwritten text from inside this box. If blank, return an empty string. "
-            "Expect mostly numbers or symbols unless clearly a word. Ignore straight lines / box borders - these are not text."
+            "Expect mostly numbers or symbols unless clearly a word or letters. Ignore straight lines / box borders - these are not text."
+            "The box may contain two evenly spaced dots- if so, acknowledge these as decimal points between the numbers next to them."
         )
         results[label] = response.get("answer", "").strip()
 
